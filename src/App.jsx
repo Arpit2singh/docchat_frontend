@@ -15,7 +15,9 @@ import {
   File, 
   ChevronRight,
   X,
-  Database
+  Database,
+  Menu,
+  Plus
 } from 'lucide-react'
 
 // Default Backend URL
@@ -30,11 +32,12 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isOnline, setIsOnline] = useState(false)
   const [isCheckingStatus, setIsCheckingStatus] = useState(false)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   
-  // Document States
-  const [activeDoc, setActiveDoc] = useState(() => {
-    const saved = localStorage.getItem('docchat_active_doc')
-    return saved ? JSON.parse(saved) : null
+  // Document States (Multiple files supported)
+  const [activeDocs, setActiveDocs] = useState(() => {
+    const saved = localStorage.getItem('docchat_active_docs')
+    return saved ? JSON.parse(saved) : []
   })
   const [isUploading, setIsUploading] = useState(false)
   const [uploadError, setUploadError] = useState('')
@@ -55,16 +58,16 @@ function App() {
   // Quick prompts for empty state
   const quickPrompts = [
     {
-      title: "Summarize this document",
-      body: "Provide a quick bulleted summary of the main topics covered."
+      title: "Summarize the documents",
+      body: "Provide a quick bulleted summary of the main topics covered across all documents."
     },
     {
       title: "Key highlights & takeaways",
       body: "What are the most important conclusions or details here?"
     },
     {
-      title: "Find contact/personal info",
-      body: "Are there any emails, phone numbers, or addresses listed?"
+      title: "Find personal or contact info",
+      body: "Are there any emails, phone numbers, or addresses listed in the files?"
     },
     {
       title: "Explain the main concept",
@@ -76,10 +79,9 @@ function App() {
   const checkBackendStatus = async (urlToCheck = apiUrl) => {
     setIsCheckingStatus(true)
     try {
-      // Remove trailing slash if present
       const formattedUrl = urlToCheck.replace(/\/$/, '')
       const controller = new AbortController()
-      const id = setTimeout(() => controller.abort(), 4000) // 4 second timeout
+      const id = setTimeout(() => controller.abort(), 4000)
       
       const response = await fetch(`${formattedUrl}/`, { 
         method: 'GET',
@@ -111,12 +113,8 @@ function App() {
   }, [messages])
 
   useEffect(() => {
-    if (activeDoc) {
-      localStorage.setItem('docchat_active_doc', JSON.stringify(activeDoc))
-    } else {
-      localStorage.removeItem('docchat_active_doc')
-    }
-  }, [activeDoc])
+    localStorage.setItem('docchat_active_docs', JSON.stringify(activeDocs))
+  }, [activeDocs])
 
   // Scroll to bottom helper
   const scrollToBottom = () => {
@@ -153,36 +151,53 @@ function App() {
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const file = e.dataTransfer.files[0]
-      if (file.type === "application/pdf" || file.name.endsWith('.pdf')) {
-        handleUpload(file)
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files)
+      const pdfFiles = files.filter(file => file.type === "application/pdf" || file.name.endsWith('.pdf'))
+      
+      if (pdfFiles.length > 0) {
+        handleUpload(pdfFiles)
       } else {
-        setUploadError("Please upload a PDF file only.")
+        setUploadError("Please upload PDF files only.")
       }
     }
   }
 
   const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      handleUpload(e.target.files[0])
+    if (e.target.files && e.target.files.length > 0) {
+      handleUpload(Array.from(e.target.files))
     }
   }
 
-  const handleUpload = async (file) => {
+  const handleUpload = async (files) => {
     setIsUploading(true)
     setUploadError('')
     
-    const formData = new FormData()
-    formData.append('file', file)
-
     const formattedUrl = apiUrl.replace(/\/$/, '')
+    
+    // We will attempt to send all files to the `/upload` endpoint in a single request.
+    const formData = new FormData()
+    files.forEach(file => {
+      formData.append('files', file)
+      formData.append('file', file) // fallback for single-file API expectations
+    })
 
     try {
-      const response = await fetch(`${formattedUrl}/ansgo`, {
+      let response = await fetch(`${formattedUrl}/upload`, {
         method: 'POST',
         body: formData,
       })
+
+      // Fallback: If /upload route returns 404/500, and it's a single file, try the old /ansgo route.
+      if (!response.ok && files.length === 1) {
+        console.warn("/upload failed, trying fallback to /ansgo")
+        const fallbackFormData = new FormData()
+        fallbackFormData.append('file', files[0])
+        response = await fetch(`${formattedUrl}/ansgo`, {
+          method: 'POST',
+          body: fallbackFormData,
+        })
+      }
 
       if (!response.ok) {
         throw new Error(`Upload failed with status code ${response.status}`)
@@ -190,24 +205,25 @@ function App() {
 
       const data = await response.json()
       
-      const fileInfo = {
+      const newDocs = files.map((file, idx) => ({
+        id: Date.now().toString() + idx + Math.random().toString(36).substr(2, 5),
         name: file.name,
         size: formatBytes(file.size),
-        total_chunks: data.total_chunks,
+        total_chunks: data.total_chunks || null,
         status: data.status || 'Processed'
-      }
+      }))
 
-      setActiveDoc(fileInfo)
+      setActiveDocs(prev => [...prev, ...newDocs])
       
       // Inject system message
       const systemMsg = {
         id: Date.now(),
         sender: 'system',
-        text: `Successfully uploaded and indexed "${file.name}". ${data.total_chunks ? `Split into ${data.total_chunks} chunks.` : ''} You can now start asking questions.`,
+        text: `Successfully uploaded and indexed ${files.length} document(s). ${data.total_chunks ? `Split into ${data.total_chunks} chunks total.` : ''} You can now ask questions!`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       }
       
-      setMessages([systemMsg])
+      setMessages(prev => [...prev, systemMsg])
     } catch (error) {
       console.error("Upload error:", error)
       setUploadError(error.message || "An error occurred during file parsing.")
@@ -238,9 +254,28 @@ function App() {
     const formattedUrl = apiUrl.replace(/\/$/, '')
 
     try {
-      const response = await fetch(`${formattedUrl}/ask?question=${encodeURIComponent(queryText)}`, {
-        method: 'POST',
-      })
+      let response;
+      let isFallback = false;
+      
+      // Try GET /getanswer?ques=... first
+      try {
+        response = await fetch(`${formattedUrl}/getanswer?ques=${encodeURIComponent(queryText)}`, {
+          method: 'GET'
+        })
+        if (!response.ok && response.status === 404) {
+          isFallback = true
+        }
+      } catch (err) {
+        console.warn("GET /getanswer failed, falling back to /ask...", err)
+        isFallback = true
+      }
+
+      // Fallback to POST /ask?question=...
+      if (isFallback) {
+        response = await fetch(`${formattedUrl}/ask?question=${encodeURIComponent(queryText)}`, {
+          method: 'POST',
+        })
+      }
 
       if (!response.ok) {
         throw new Error(`Request failed with status code ${response.status}`)
@@ -248,8 +283,14 @@ function App() {
 
       const data = await response.json()
       
-      // Simulate real-time streaming text (Word by Word)
-      const fullAnswer = data.answer || "No response details were returned by the model."
+      // Resilient answer extraction
+      let fullAnswer = ""
+      if (data && typeof data === 'object') {
+        fullAnswer = data.answer || data.response || data.message || JSON.stringify(data)
+      } else {
+        fullAnswer = data || "No response details were returned by the model."
+      }
+
       const words = fullAnswer.split(' ')
       let currentText = ''
       
@@ -272,7 +313,7 @@ function App() {
             msg.id === botMsgId ? { ...msg, text: currentText } : msg
           ))
           wordIndex++
-          setTimeout(streamWords, 25) // Smooth typing effect delay
+          setTimeout(streamWords, 20)
         } else {
           setIsBotResponding(false)
         }
@@ -292,9 +333,14 @@ function App() {
     }
   }
 
-  // Clear or reset active document and chat history
+  // Remove a single file
+  const handleRemoveDoc = (idToRemove) => {
+    setActiveDocs(prev => prev.filter(doc => doc.id !== idToRemove))
+  }
+
+  // Clear session
   const handleResetSession = () => {
-    setActiveDoc(null)
+    setActiveDocs([])
     setMessages([])
     setUploadError('')
   }
@@ -315,40 +361,72 @@ function App() {
 
   return (
     <div className="app-container">
+      {/* Sidebar Backdrop Overlay for Mobile Screen sizes */}
+      {isSidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setIsSidebarOpen(false)}></div>
+      )}
+
       {/* Sidebar Panel */}
-      <aside className="sidebar glass">
+      <aside className={`sidebar glass ${isSidebarOpen ? 'open' : ''}`}>
         <div className="sidebar-header">
           <div className="logo-icon">
             <MessageSquare size={20} color="#ffffff" />
           </div>
           <span className="logo-text">DocChat AI</span>
+          
+          <button 
+            className="sidebar-close-btn"
+            onClick={() => setIsSidebarOpen(false)}
+            title="Close Sidebar"
+          >
+            <X size={18} />
+          </button>
         </div>
 
         <div className="sidebar-content">
-          {/* Active Document Section */}
+          {/* Active Documents Section */}
           <div className="sidebar-section">
-            <span className="section-title">Active Document</span>
-            {activeDoc ? (
-              <div className="doc-info-card">
-                <div className="doc-header">
-                  <div className="doc-icon-wrapper">
-                    <FileText size={20} />
+            <span className="section-title">Active Documents ({activeDocs.length})</span>
+            {activeDocs.length > 0 ? (
+              <div className="docs-list">
+                {activeDocs.map((doc) => (
+                  <div key={doc.id} className="doc-info-card">
+                    <div className="doc-header">
+                      <div className="doc-icon-wrapper">
+                        <FileText size={18} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="doc-name" title={doc.name}>{doc.name}</div>
+                        <div className="doc-size">{doc.size}</div>
+                      </div>
+                      <button 
+                        className="remove-doc-btn" 
+                        onClick={() => handleRemoveDoc(doc.id)}
+                        title="Remove document"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                    {doc.total_chunks && (
+                      <div className="doc-badge">
+                        {doc.total_chunks} Chunks
+                      </div>
+                    )}
                   </div>
-                  <div>
-                    <div className="doc-name" title={activeDoc.name}>{activeDoc.name}</div>
-                    <div className="doc-size">{activeDoc.size}</div>
-                  </div>
-                </div>
-                <div className="doc-badge">
-                  {activeDoc.total_chunks ? `${activeDoc.total_chunks} Chunks` : activeDoc.status}
-                </div>
-                <button className="btn btn-secondary" style={{ width: '100%', fontSize: '11px', padding: '6px' }} onClick={handleResetSession}>
-                  Upload Different PDF
+                ))}
+                
+                <button 
+                  className="btn btn-secondary" 
+                  style={{ width: '100%', fontSize: '11px', marginTop: '10px', padding: '8px' }}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Plus size={14} />
+                  Add More PDFs
                 </button>
               </div>
             ) : (
               <div className="doc-info-card" style={{ borderStyle: 'dashed', textAlign: 'center', padding: '24px 16px' }}>
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>No document active</p>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>No documents loaded</p>
                 <button 
                   className="btn btn-primary" 
                   style={{ width: '100%', fontSize: '11px', marginTop: '12px', padding: '8px' }}
@@ -361,18 +439,28 @@ function App() {
           </div>
 
           {/* Quick Actions Panel */}
-          {activeDoc && (
+          {activeDocs.length > 0 && (
             <div className="sidebar-section">
-              <span className="section-title">Actions</span>
-              <button 
-                className="btn btn-secondary" 
-                style={{ width: '100%', justifyContent: 'flex-start' }}
-                onClick={handleClearHistory}
-                disabled={messages.length === 0}
-              >
-                <Trash2 size={16} />
-                Clear Chat History
-              </button>
+              <span className="section-title">Session Actions</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <button 
+                  className="btn btn-secondary" 
+                  style={{ width: '100%', justifyContent: 'flex-start' }}
+                  onClick={handleClearHistory}
+                  disabled={messages.length === 0}
+                >
+                  <Trash2 size={16} />
+                  Clear Chat History
+                </button>
+                <button 
+                  className="btn btn-secondary" 
+                  style={{ width: '100%', justifyContent: 'flex-start', color: 'var(--error)' }}
+                  onClick={handleResetSession}
+                >
+                  <RefreshCw size={16} />
+                  Reset Session
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -410,14 +498,27 @@ function App() {
       {/* Main Chat Container */}
       <main className="main-content">
         <header className="chat-header glass" style={{ borderTop: 'none', borderLeft: 'none', borderRight: 'none' }}>
+          <button 
+            className="menu-toggle-btn"
+            onClick={() => setIsSidebarOpen(true)}
+            title="Open Sidebar"
+          >
+            <Menu size={20} />
+          </button>
+
           <div className="header-title-container">
             <div className="header-title">
-              {activeDoc ? activeDoc.name : 'AI Document Assistant'}
+              {activeDocs.length > 0 
+                ? (activeDocs.length === 1 ? activeDocs[0].name : `${activeDocs.length} Documents loaded`) 
+                : 'AI Document Assistant'}
             </div>
             <div className="header-subtitle">
-              {activeDoc ? `RAG-powered chat with ${activeDoc.size}` : 'Connect a PDF document to begin asking questions'}
+              {activeDocs.length > 0 
+                ? `RAG-powered chat across your documents` 
+                : 'Connect PDF documents to begin asking questions'}
             </div>
           </div>
+          
           <div className="header-actions">
             <div className={`status-dot ${isOnline ? 'online' : 'offline'}`} title={isOnline ? 'Server connected' : 'Server disconnected'}></div>
             <button className="icon-btn" onClick={() => setIsSettingsOpen(true)} title="Settings">
@@ -426,90 +527,149 @@ function App() {
           </div>
         </header>
 
-        {!activeDoc ? (
-          /* Welcome & Upload Screen */
+        {activeDocs.length === 0 ? (
+          /* ═══════════════════════════════════════════════════════
+             DASHBOARD FRONTPAGE 
+             ═══════════════════════════════════════════════════════ */
           <div className="welcome-container">
-            <div className="welcome-inner">
-              <div className="welcome-logo-badge">
-                <Sparkles size={38} />
-              </div>
-              <h2 className="welcome-title">DocChat Intelligent Assistant</h2>
-              <p className="welcome-desc">
-                Upload your document to split, chunk, and embed it using Chroma Cloud and Gemini 3.5. 
-                Once processed, you can ask context-aware questions instantly!
-              </p>
+            <div className="welcome-inner dashboard-layout">
 
-              {/* Upload Dropzone */}
-              {!isUploading ? (
-                <div 
-                  className={`upload-zone ${dragActive ? 'dragging' : ''}`}
-                  onDragEnter={handleDrag}
-                  onDragOver={handleDrag}
-                  onDragLeave={handleDrag}
-                  onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    style={{ display: 'none' }} 
-                    accept=".pdf" 
-                    onChange={handleFileChange}
-                  />
-                  <UploadCloud size={48} className="upload-zone-icon" />
-                  <div>
-                    <p className="upload-zone-text">Drag and drop your PDF here</p>
-                    <p className="upload-zone-subtext">or click to browse from files</p>
-                  </div>
-                  {uploadError && (
-                    <div style={{ color: 'var(--error)', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-                      <AlertCircle size={14} />
-                      {uploadError}
-                    </div>
-                  )}
+              {/* ── Hero Section ── */}
+              <section className="hero-section">
+                <div className="hero-glow"></div>
+                <div className="hero-badge animate-float">
+                  <div className="hero-badge-ring"></div>
+                  <Sparkles size={36} />
                 </div>
-              ) : (
-                /* Uploading / Embedding Progress State */
-                <div className="upload-progress-card">
-                  <div className="progress-spinner"></div>
-                  <div>
-                    <p className="progress-text">Analyzing & Chunking Document...</p>
-                    <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      Generating text embeddings and saving to vector store
-                    </p>
+                <h1 className="hero-title">
+                  Doc<span className="hero-title-accent">Chat</span> AI
+                </h1>
+                <p className="hero-tagline">Intelligent Multi-Document Assistant</p>
+                <p className="hero-desc">
+                  Upload PDFs, analyze content with AI-powered RAG, and get instant 
+                  context-aware answers across all your documents.
+                </p>
+
+                {/* Status Pills */}
+                <div className="hero-status-row">
+                  <div className={`hero-pill ${isOnline ? 'online' : 'offline'}`}>
+                    <div className={`status-dot ${isOnline ? 'online' : 'offline'}`}></div>
+                    {isOnline ? 'Backend Online' : 'Backend Offline'}
                   </div>
-                  <div className="progress-bar-bg">
-                    <div className="progress-bar-fill"></div>
+                  <div className="hero-pill neutral">
+                    <Database size={12} />
+                    ChromaDB + Gemini
                   </div>
                 </div>
-              )}
+              </section>
 
-              {/* Optional: bypass if Chroma already has documents */}
-              {!isUploading && (
-                <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-                  <button 
-                    className="btn btn-secondary" 
-                    style={{ fontSize: '12px' }}
-                    onClick={() => {
-                      setActiveDoc({
-                        name: "Chroma Vector DB Collection",
-                        size: "Persistent Store",
-                        total_chunks: null,
-                        status: "Persistent"
-                      })
-                      setMessages([{
-                        id: Date.now(),
-                        sender: 'system',
-                        text: "Connected to the persistent Chroma cloud collection directly. Ask questions about previously uploaded documents.",
-                        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                      }])
-                    }}
+              {/* ── Feature Cards Grid ── */}
+              <section className="features-grid">
+                <div className="feature-card">
+                  <div className="feature-icon-wrap purple">
+                    <UploadCloud size={22} />
+                  </div>
+                  <h3 className="feature-title">Multi-File Upload</h3>
+                  <p className="feature-desc">Upload multiple PDFs at once. Drag & drop or browse to get started instantly.</p>
+                </div>
+                <div className="feature-card">
+                  <div className="feature-icon-wrap blue">
+                    <Sparkles size={22} />
+                  </div>
+                  <h3 className="feature-title">AI-Powered RAG</h3>
+                  <p className="feature-desc">Documents are chunked, embedded, and stored for semantic retrieval using Gemini.</p>
+                </div>
+                <div className="feature-card">
+                  <div className="feature-icon-wrap green">
+                    <MessageSquare size={22} />
+                  </div>
+                  <h3 className="feature-title">Chat Interface</h3>
+                  <p className="feature-desc">Ask natural language questions and get precise, context-aware answers in real time.</p>
+                </div>
+              </section>
+
+              {/* ── Upload Zone ── */}
+              <section className="upload-section">
+                <h2 className="upload-section-title">Get Started</h2>
+                {!isUploading ? (
+                  <div 
+                    className={`upload-zone ${dragActive ? 'dragging' : ''}`}
+                    onDragEnter={handleDrag}
+                    onDragOver={handleDrag}
+                    onDragLeave={handleDrag}
+                    onDrop={handleDrop}
+                    onClick={() => fileInputRef.current?.click()}
                   >
-                    <Database size={14} />
-                    Chat with existing Chroma collection
-                  </button>
-                </div>
-              )}
+                    <input 
+                      type="file" 
+                      ref={fileInputRef} 
+                      style={{ display: 'none' }} 
+                      accept=".pdf" 
+                      multiple
+                      onChange={handleFileChange}
+                    />
+                    <div className="upload-zone-icon-wrap">
+                      <UploadCloud size={40} className="upload-zone-icon" />
+                    </div>
+                    <div>
+                      <p className="upload-zone-text">Drag & drop your PDFs here</p>
+                      <p className="upload-zone-subtext">or click to browse · supports multiple files</p>
+                    </div>
+                    {uploadError && (
+                      <div className="upload-error">
+                        <AlertCircle size={14} />
+                        {uploadError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="upload-progress-card">
+                    <div className="progress-spinner"></div>
+                    <div>
+                      <p className="progress-text">Analyzing & Chunking Documents...</p>
+                      <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                        Generating text embeddings and saving to vector store
+                      </p>
+                    </div>
+                    <div className="progress-bar-bg">
+                      <div className="progress-bar-fill"></div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Chroma bypass */}
+                {!isUploading && (
+                  <div className="upload-actions-row">
+                    <button 
+                      className="btn btn-secondary btn-chroma" 
+                      onClick={() => {
+                        const collectionDoc = {
+                          id: 'chroma-collection',
+                          name: "Chroma Vector DB Collection",
+                          size: "Persistent Store",
+                          total_chunks: null,
+                          status: "Persistent"
+                        }
+                        setActiveDocs([collectionDoc])
+                        setMessages([{
+                          id: Date.now(),
+                          sender: 'system',
+                          text: "Connected to the persistent Chroma cloud collection directly. Ask questions about previously uploaded documents.",
+                          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        }])
+                      }}
+                    >
+                      <Database size={14} />
+                      Chat with existing Chroma collection
+                    </button>
+                  </div>
+                )}
+              </section>
+
+              {/* ── Footer branding ── */}
+              <p className="dashboard-footer-text">
+                Powered by <strong>FastAPI</strong> · <strong>ChromaDB</strong> · <strong>Google Gemini</strong>
+              </p>
             </div>
           </div>
         ) : (
@@ -520,17 +680,7 @@ function App() {
                 if (msg.sender === 'system') {
                   return (
                     <div key={msg.id} style={{ display: 'flex', justifyContent: 'center', width: '100%', margin: '8px 0' }}>
-                      <div style={{ 
-                        background: 'rgba(255, 255, 255, 0.02)', 
-                        border: '1px solid var(--border-color)', 
-                        padding: '8px 16px', 
-                        borderRadius: '20px', 
-                        fontSize: '12px',
-                        color: 'var(--text-secondary)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px'
-                      }}>
+                      <div className="system-message">
                         <CheckCircle size={14} color="var(--success)" />
                         <span>{msg.text}</span>
                       </div>
@@ -547,7 +697,6 @@ function App() {
                     <div>
                       <div className="message-bubble">
                         {msg.text || (
-                          /* Loading indicator within bubbles for stream */
                           <div className="typing-indicator">
                             <div className="typing-dot"></div>
                             <div className="typing-dot"></div>
@@ -582,7 +731,7 @@ function App() {
 
             {/* Quick starter hints inside chat when history is short */}
             {messages.length <= 1 && (
-              <div style={{ padding: '0 24px', display: 'flex', justifyContent: 'center', marginBottom: '10px' }}>
+              <div className="quick-prompts-wrapper">
                 <div className="prompts-grid">
                   {quickPrompts.map((p, idx) => (
                     <div key={idx} className="prompt-card" onClick={() => handleSendMessage(p.title)}>
@@ -599,7 +748,7 @@ function App() {
               <div className="chat-input-wrapper">
                 <textarea
                   className="chat-input"
-                  placeholder="Ask a question about the document..."
+                  placeholder="Ask a question about your documents..."
                   value={inputMessage}
                   onChange={(e) => setInputMessage(e.target.value)}
                   onKeyDown={(e) => {
