@@ -178,8 +178,7 @@ function App() {
     // We will attempt to send all files to the `/upload` endpoint in a single request.
     const formData = new FormData()
     files.forEach(file => {
-      formData.append('files', file)
-      formData.append('file', file) // fallback for single-file API expectations
+      formData.append('pdfs', file)
     })
 
     try {
@@ -257,10 +256,10 @@ function App() {
       let response;
       let isFallback = false;
       
-      // Try GET /getanswer?ques=... first
+      // Try POST /getanswer?ques=... first
       try {
         response = await fetch(`${formattedUrl}/getanswer?ques=${encodeURIComponent(queryText)}`, {
-          method: 'GET'
+          method: 'POST'
         })
         if (!response.ok && response.status === 404) {
           isFallback = true
