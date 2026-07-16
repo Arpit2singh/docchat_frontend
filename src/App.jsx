@@ -23,6 +23,48 @@ import {
 // Default Backend URL
 const DEFAULT_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
+// Helper to format text with Markdown bold and bullet lists
+function formatMessageText(text) {
+  if (!text) return null;
+
+  // Split text by newlines
+  const lines = text.split('\n');
+  
+  return lines.map((line, index) => {
+    // Process line: check if it's a list item (starts with * or + or - followed by space)
+    const isBullet = /^\s*[\*\+\-]\s+(.*)/.exec(line);
+    
+    // Function to parse inline bolding **text**
+    const parseBold = (str) => {
+      const parts = str.split('**');
+      return parts.map((part, i) => {
+        if (i % 2 === 1) {
+          return <strong key={i} style={{ fontWeight: '700', color: 'var(--text-primary)' }}>{part}</strong>;
+        }
+        return part;
+      });
+    };
+
+    if (isBullet) {
+      return (
+        <li key={index} className="parsed-bullet" style={{ marginLeft: '18px', listStyleType: 'disc', display: 'list-item', marginBlock: '6px', lineHeight: '1.6' }}>
+          {parseBold(isBullet[1])}
+        </li>
+      );
+    }
+
+    if (!line.trim()) {
+      return <div key={index} style={{ height: '8px' }} />;
+    }
+
+    return (
+      <p key={index} className="parsed-paragraph" style={{ marginBlock: '6px', lineHeight: '1.6', minHeight: '1em' }}>
+        {parseBold(line)}
+      </p>
+    );
+  });
+}
+
 function App() {
   // App States
   const [apiUrl, setApiUrl] = useState(() => {
@@ -695,7 +737,9 @@ function App() {
                     </div>
                     <div>
                       <div className="message-bubble">
-                        {msg.text || (
+                        {msg.text ? (
+                          formatMessageText(msg.text)
+                        ) : (
                           <div className="typing-indicator">
                             <div className="typing-dot"></div>
                             <div className="typing-dot"></div>
