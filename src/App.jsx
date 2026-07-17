@@ -273,7 +273,7 @@ function App() {
     }
   }
 
-  // Ask Question Logic
+  // Ask Question Logic (Job Scheduler: submit → poll for result)
   const handleSendMessage = async (textToSend) => {
     const queryText = textToSend || inputMessage
     if (!queryText.trim()) return
@@ -295,43 +295,100 @@ function App() {
     const formattedUrl = apiUrl.replace(/\/$/, '')
 
     try {
-      let response;
-      let isFallback = false;
-      
-      // Try POST /getanswer?ques=... first
+      // Step 1: Submit the question to /getanswer → get a job_id
+      let jobId = null
+      let isFallback = false
+
       try {
-        response = await fetch(`${formattedUrl}/getanswer?ques=${encodeURIComponent(queryText)}`, {
+        const submitResponse = await fetch(`${formattedUrl}/getanswer?ques=${encodeURIComponent(queryText)}`, {
           method: 'POST'
         })
-        if (!response.ok && response.status === 404) {
+
+        if (submitResponse.ok) {
+          const submitData = await submitResponse.json()
+          jobId = submitData.job_id
+        } else if (submitResponse.status === 404) {
           isFallback = true
+        } else {
+          throw new Error(`Submit failed with status code ${submitResponse.status}`)
         }
       } catch (err) {
-        console.warn("GET /getanswer failed, falling back to /ask...", err)
-        isFallback = true
+        if (!isFallback && !jobId) {
+          console.warn("POST /getanswer failed, falling back to /ask...", err)
+          isFallback = true
+        }
       }
 
-      // Fallback to POST /ask?question=...
-      if (isFallback) {
-        response = await fetch(`${formattedUrl}/ask?question=${encodeURIComponent(queryText)}`, {
+      let fullAnswer = ""
+
+      if (jobId) {
+        // Step 2: Poll /get_result?job_id=... until the answer is ready
+        const POLL_INTERVAL_MS = 2000
+        const MAX_POLL_TIME_MS = 120000 // 2 minute timeout
+        const startTime = Date.now()
+
+        while (true) {
+          if (Date.now() - startTime > MAX_POLL_TIME_MS) {
+            throw new Error("Request timed out after 2 minutes. The server may be under heavy load.")
+          }
+
+          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
+
+          const resultResponse = await fetch(`${formattedUrl}/get_result?job_id=${encodeURIComponent(jobId)}`, {
+            method: 'GET'
+          })
+
+          if (!resultResponse.ok) {
+            throw new Error(`Polling failed with status code ${resultResponse.status}`)
+          }
+
+          const resultData = await resultResponse.json()
+
+          // Check for errors from the job queue
+          if (resultData.error) {
+            // If the job is still running, the error might indicate it's not ready yet
+            const errMsg = resultData.error.toLowerCase()
+            if (errMsg.includes('nonetype') || errMsg.includes('not ready') || errMsg.includes('none')) {
+              // Job still processing, continue polling
+              continue
+            }
+            throw new Error(`Job error: ${resultData.error}`)
+          }
+
+          // Result is ready
+          if (resultData.result) {
+            const result = resultData.result
+            if (typeof result === 'object') {
+              fullAnswer = result.answer || result.response || result.message || JSON.stringify(result)
+            } else {
+              fullAnswer = String(result)
+            }
+            break
+          }
+        }
+      } else if (isFallback) {
+        // Fallback to POST /ask?question=... (direct response, no job queue)
+        const fallbackResponse = await fetch(`${formattedUrl}/ask?question=${encodeURIComponent(queryText)}`, {
           method: 'POST',
         })
+
+        if (!fallbackResponse.ok) {
+          throw new Error(`Request failed with status code ${fallbackResponse.status}`)
+        }
+
+        const data = await fallbackResponse.json()
+        if (data && typeof data === 'object') {
+          fullAnswer = data.answer || data.response || data.message || JSON.stringify(data)
+        } else {
+          fullAnswer = data || "No response details were returned by the model."
+        }
       }
 
-      if (!response.ok) {
-        throw new Error(`Request failed with status code ${response.status}`)
+      if (!fullAnswer) {
+        fullAnswer = "No response was returned by the model."
       }
 
-      const data = await response.json()
-      
-      // Resilient answer extraction
-      let fullAnswer = ""
-      if (data && typeof data === 'object') {
-        fullAnswer = data.answer || data.response || data.message || JSON.stringify(data)
-      } else {
-        fullAnswer = data || "No response details were returned by the model."
-      }
-
+      // Stream the answer word-by-word
       const words = fullAnswer.split(' ')
       let currentText = ''
       
